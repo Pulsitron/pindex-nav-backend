@@ -1,89 +1,108 @@
 // server.mjs
-
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 import pkg from "pg";
-
 const { Client } = pkg;
 
-// Railway will give you this env var automatically
-const dbUrl = process.env.DATABASE_URL;
+// Railway port
 const PORT = process.env.PORT || 8080;
 
+// Railway Postgres URL
+const dbUrl = process.env.DATABASE_URL;
 if (!dbUrl) {
-  console.log("DATABASE_URL is not set yet. This will be set on Railway.");
+  console.log("DATABASE_URL is not set. Remember to add it in Railway.");
 }
 
-// ---------- DB helpers ----------
+// --------------------
+// 1. Fetch real price from Dexscreener
+// --------------------
+async function fetchPindexPriceUsd() {
+  // Dexscreener pair: PINDEX / PLS on PulseChain
+  const url =
+    "https://api.dexscreener.com/latest/dex/pairs/pulsechain/0xc4056ab039378dee12de721f39b6e54fa09ee55b";
 
-async function getClient() {
-  const client = new Client({
-    connectionString: dbUrl,
-  });
-  await client.connect();
-  return client;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error("Failed to fetch Dexscreener price: " + res.statusText);
+  }
+
+  const data = await res.json();
+  const pair = data?.pairs?.[0];
+  const priceStr = pair?.priceUsd;
+
+  const price = priceStr ? Number(priceStr) : NaN;
+  if (!isFinite(price) || price <= 0) {
+    throw new Error("Invalid priceUsd from Dexscreener");
+  }
+
+  return price;
 }
 
-// ---------- Price writer (fake for now) ----------
-
-async function saveFakePrice() {
+// --------------------
+// 2. Save price into nav_history
+// --------------------
+async function saveNavPrice() {
   if (!dbUrl) {
     console.log("No DATABASE_URL set, skipping write.");
     return;
   }
 
-  const client = await getClient();
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
 
-  // Fake index price, just random for now (we’ll replace this later)
-  const fakePrice = 0.001 + Math.random() * 0.0005;
+  try {
+    const priceUsd = await fetchPindexPriceUsd();
 
-  await client.query(
-    "INSERT INTO nav_history (price_usd) VALUES ($1)",
-    [fakePrice]
-  );
+    await client.query(
+      "INSERT INTO nav_history (price_usd) VALUES ($1)",
+      [priceUsd]
+    );
 
-  await client.end();
-  console.log("Saved fake price:", fakePrice);
+    console.log("Saved real PINDEX price (USD):", priceUsd);
+  } catch (err) {
+    console.error("Error saving NAV price:", err.message || err);
+  } finally {
+    await client.end();
+  }
 }
 
-// Run once on start (so there is at least one row)
-saveFakePrice().catch(console.error);
+// --------------------
+// 3. Helper for read-only queries
+// --------------------
+async function queryDb(sql, params = []) {
+  if (!dbUrl) throw new Error("DATABASE_URL not set");
 
-// Run every 5 minutes
-cron.schedule("*/5 * * * *", () => {
-  saveFakePrice().catch(console.error);
-});
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
 
-// ---------- HTTP API ----------
+  try {
+    const result = await client.query(sql, params);
+    return result.rows;
+  } finally {
+    await client.end();
+  }
+}
 
+// --------------------
+// 4. Express API
+// --------------------
 const app = express();
 app.use(cors());
 
-// sanity check route
 app.get("/", (req, res) => {
-  res.send("PINDEX NAV backend is running");
+  res.send("PINDEX NAV backend is running.");
 });
 
-// GET /nav/latest  -> latest price row
+// Latest price
 app.get("/nav/latest", async (req, res) => {
-  if (!dbUrl) {
-    return res.status(500).json({ error: "DATABASE_URL is not set" });
-  }
-
   try {
-    const client = await getClient();
-
-    const { rows } = await client.query(
-      `
-      SELECT price_usd, created_at
-      FROM nav_history
-      ORDER BY created_at DESC NULLS LAST, id DESC
-      LIMIT 1
-      `
+    const rows = await queryDb(
+      `SELECT price_usd, created_at
+       FROM nav_history
+       ORDER BY created_at DESC NULLS LAST, id DESC
+       LIMIT 1`
     );
-
-    await client.end();
 
     if (!rows.length) {
       return res.status(404).json({ error: "No NAV data yet" });
@@ -92,44 +111,38 @@ app.get("/nav/latest", async (req, res) => {
     res.json(rows[0]);
   } catch (err) {
     console.error("Error in /nav/latest:", err);
-    res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// GET /nav/history?limit=100  -> last N rows (for charts later)
+// Full history (up to 500 points)
 app.get("/nav/history", async (req, res) => {
-  if (!dbUrl) {
-    return res.status(500).json({ error: "DATABASE_URL is not set" });
-  }
-
-  const limit = Math.min(
-    parseInt(req.query.limit || "200", 10) || 200,
-    1000
-  );
-
   try {
-    const client = await getClient();
-
-    const { rows } = await client.query(
-      `
-      SELECT price_usd, created_at
-      FROM nav_history
-      ORDER BY created_at ASC, id ASC
-      LIMIT $1
-      `,
-      [limit]
+    const rows = await queryDb(
+      `SELECT price_usd, created_at
+       FROM nav_history
+       ORDER BY created_at ASC, id ASC
+       LIMIT 500`
     );
-
-    await client.end();
 
     res.json(rows);
   } catch (err) {
     console.error("Error in /nav/history:", err);
-    res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ---------- Start server ----------
+// --------------------
+// 5. Start cron + server
+// --------------------
+
+// Run once on start
+saveNavPrice().catch(console.error);
+
+// Run every 5 minutes
+cron.schedule("*/5 * * * *", () => {
+  saveNavPrice().catch(console.error);
+});
 
 app.listen(PORT, () => {
   console.log(`NAV API running on port ${PORT}`);
