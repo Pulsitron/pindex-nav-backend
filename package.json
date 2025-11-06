@@ -4,8 +4,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
-  },
+  "start": "node server.mjs"
+}
+,
   "dependencies": {
     "pg": "^8.11.5",
     "node-cron": "^3.0.3"
