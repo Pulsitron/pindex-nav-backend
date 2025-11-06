@@ -114,33 +114,40 @@ async function getPindexNavUsd() {
   return perTokenUsd;
 }
 
+// Save one NAV snapshot into Postgres
 async function saveNavSnapshot() {
-  if (!dbUrl) {
-    console.log("No DATABASE_URL; skipping DB write.");
-    return;
-  }
-
   try {
-    const priceUsd = await getPindexNavUsd();
-    if (priceUsd == null) {
+    // 👇 actually calculate the NAV (this function you already have)
+    const navUsd = await computeNavUsd();
+
+    if (navUsd == null) {
       console.log("NAV calc returned null; skipping snapshot.");
       return;
     }
 
-    const client = new Client({ connectionString: dbUrl });
+    if (!dbUrl) {
+      console.log("No DATABASE_URL set, skipping write.");
+      return;
+    }
+
+    const client = new Client({
+      connectionString: dbUrl,
+      ssl: { rejectUnauthorized: false }
+    });
+
     await client.connect();
     await client.query(
-  "INSERT INTO nav_history (price_usd, created_at) VALUES ($1, NOW())",
-  [navUsd]
-);
-
+      "INSERT INTO nav_history (price_usd) VALUES ($1)",
+      [navUsd]
+    );
     await client.end();
 
-    console.log("Saved NAV snapshot:", priceUsd);
-  } catch (e) {
-    console.log("Error saving NAV snapshot:", e);
+    console.log("Saved NAV snapshot:", navUsd);
+  } catch (err) {
+    console.error("Error saving NAV snapshot:", err);
   }
 }
+
 
 // --- EXPRESS API ---
 
@@ -195,8 +202,8 @@ app.get("/nav/history", async (req, res) => {
 // Run once on start
 saveNavSnapshot().catch(console.error);
 
-// Run every 30 seconds
-cron.schedule("*/30 * * * * *", () => {
+// Run every 60 seconds
+cron.schedule("*/60 * * * * *", () => {
   saveNavSnapshot().catch(console.error);
 });
 
