@@ -17,7 +17,7 @@ if (!dbUrl) {
 const RPC_URL =
   process.env.PULSE_RPC_URL || "https://rpc.pulsechain.com";
 
-const provider = new ethers.providers.JsonRpcProvider(RCP_URL);
+const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 
 const CONTRACT_ADDRESS = "0x67D67511DBe79082Fc7e5F39c791b4DE4c940742";
 const ROUTER_ADDRESS   = "0x165C3410fC91EF562C50559f7d2289fEbed552d9";
