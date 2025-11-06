@@ -130,9 +130,10 @@ async function saveNavSnapshot() {
     const client = new Client({ connectionString: dbUrl });
     await client.connect();
     await client.query(
-      "INSERT INTO nav_history (price_usd) VALUES ($1)",
-      [priceUsd]
-    );
+  "INSERT INTO nav_history (price_usd, created_at) VALUES ($1, NOW())",
+  [navUsd]
+);
+
     await client.end();
 
     console.log("Saved NAV snapshot:", priceUsd);
