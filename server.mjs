@@ -140,6 +140,7 @@ async function computeNavUsd() {
 
 // --- DB HELPERS ---------------------------------------------------------
 
+// Get the latest `limit` rows, but return them oldest → newest for plotting
 async function getLatestNavFromDb(limit = 200) {
   if (!dbUrl) return [];
 
@@ -147,15 +148,26 @@ async function getLatestNavFromDb(limit = 200) {
     connectionString: dbUrl,
     ssl: { rejectUnauthorized: false }
   });
+
   await client.connect();
 
+  // IMPORTANT FIX:
+  //   - First order DESC to get newest rows
+  //   - Then reverse in JS so chart sees chronological data
   const res = await client.query(
-    "SELECT id, price_usd, created_at FROM nav_history ORDER BY created_at ASC LIMIT $1",
+    `
+    SELECT id, price_usd, created_at
+    FROM nav_history
+    ORDER BY created_at DESC
+    LIMIT $1
+    `,
     [limit]
   );
 
   await client.end();
-  return res.rows;
+
+  // rows are newest → oldest, so flip them
+  return res.rows.reverse();
 }
 
 // Save one NAV snapshot into Postgres
@@ -178,10 +190,10 @@ async function saveNavSnapshot() {
     });
 
     await client.connect();
-   await client.query(
-  "INSERT INTO nav_history (price_usd, created_at) VALUES ($1, NOW())",
-  [navUsd]
-);
+    await client.query(
+      "INSERT INTO nav_history (price_usd, created_at) VALUES ($1, NOW())",
+      [navUsd]
+    );
     await client.end();
 
     console.log("Saved NAV snapshot:", navUsd);
@@ -204,6 +216,7 @@ app.get("/", (req, res) => {
 app.get("/nav/latest", async (req, res) => {
   try {
     const rows = await getLatestNavFromDb(1);
+    res.setHeader("Cache-Control", "no-store");
     res.json(rows[0] || null);
   } catch (e) {
     console.error(e);
@@ -215,6 +228,8 @@ app.get("/nav/latest", async (req, res) => {
 app.get("/nav/history", async (req, res) => {
   try {
     const rows = await getLatestNavFromDb(200);
+    // prevent CDN / browser caching
+    res.setHeader("Cache-Control", "no-store");
     res.json(rows);
   } catch (e) {
     console.error(e);
@@ -224,6 +239,8 @@ app.get("/nav/history", async (req, res) => {
 
 // --- CRON: every 60 seconds ---------------------------------------------
 
+// node-cron format: second minute hour day month dow
+// "*/60 * * * * *" → every 60 seconds (i.e. roughly once per minute)
 cron.schedule("*/60 * * * * *", () => {
   saveNavSnapshot().catch(console.error);
 });
