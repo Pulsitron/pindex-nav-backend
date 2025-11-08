@@ -178,10 +178,10 @@ async function saveNavSnapshot() {
     });
 
     await client.connect();
-    await client.query(
-      "INSERT INTO nav_history (price_usd) VALUES ($1)",
-      [navUsd]
-    );
+   await client.query(
+  "INSERT INTO nav_history (price_usd, created_at) VALUES ($1, NOW())",
+  [navUsd]
+);
     await client.end();
 
     console.log("Saved NAV snapshot:", navUsd);
