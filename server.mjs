@@ -1,4 +1,4 @@
-// server.mjs  – full file
+// server.mjs
 
 import express from "express";
 import cors from "cors";
@@ -21,7 +21,7 @@ if (!RPC_URL) {
   console.log("RPC_URL is not set – on-chain NAV calc will be skipped.");
 }
 
-// --- ON-CHAIN CONFIG (same as front-end) --------------------------------
+// --- ON-CHAIN CONFIG ----------------------------------------------------
 
 const CONTRACT_ADDRESS = "0x67D67511DBe79082Fc7e5F39c791b4DE4c940742";
 const ROUTER_ADDRESS   = "0x165C3410fC91EF562C50559f7d2289fEbed552d9";
@@ -64,7 +64,7 @@ if (RPC_URL) {
 
 // --- HELPERS ------------------------------------------------------------
 
-// Get PLS -> USD price (same source the front-end used)
+// Get PLS -> USD price
 async function getPlsUsdPrice() {
   try {
     const res = await fetch(
@@ -84,7 +84,7 @@ async function getPlsUsdPrice() {
   }
 }
 
-// Compute NAV per PINDEX in USD, using
+// Compute NAV per PINDEX in USD:
 //   NAV = total basket value in PLS * PLS_USD / total PINDEX supply
 async function computeNavUsd() {
   if (!provider || !indexContract || !routerContract) {
@@ -92,7 +92,6 @@ async function computeNavUsd() {
     return null;
   }
 
-  // 1) on-chain total supply + PLS balance held by contract
   const [totalSupplyBN, contractPlsBN, decimals] = await Promise.all([
     indexContract.totalSupply(),
     provider.getBalance(CONTRACT_ADDRESS),
@@ -100,19 +99,16 @@ async function computeNavUsd() {
   ]);
 
   const totalSupply = Number(ethers.utils.formatUnits(totalSupplyBN, decimals));
-  if (!totalSupply || totalSupply === 0) {
-    return null;
-  }
+  if (!totalSupply || totalSupply === 0) return null;
 
-  // 2) convert each basket token to PLS via router
   let totalPlsFromTokens = ethers.BigNumber.from(0);
 
   for (const token of BASKET_TOKENS) {
     try {
       const erc = new ethers.Contract(token.address, ERC20_ABI, provider);
-      const [balanceBN, tokenDecimals] = await Promise.all([
+      const [balanceBN] = await Promise.all([
         erc.balanceOf(CONTRACT_ADDRESS),
-        erc.decimals()
+        erc.decimals() // we don't actually need the decimals for getAmountsOut
       ]);
 
       if (balanceBN.gt(0)) {
@@ -129,18 +125,15 @@ async function computeNavUsd() {
   const totalTreasuryPlsBN = contractPlsBN.add(totalPlsFromTokens);
   const totalTreasuryPls = Number(ethers.utils.formatEther(totalTreasuryPlsBN));
 
-  // 3) get PLS price in USD
   const plsUsd = await getPlsUsdPrice();
   if (!plsUsd) return null;
 
-  // 4) NAV per PINDEX in USD
   const navUsd = (totalTreasuryPls * plsUsd) / totalSupply;
   return navUsd;
 }
 
 // --- DB HELPERS ---------------------------------------------------------
 
-// Get the latest `limit` rows, but return them oldest → newest for plotting
 async function getLatestNavFromDb(limit = 200) {
   if (!dbUrl) return [];
 
@@ -151,22 +144,18 @@ async function getLatestNavFromDb(limit = 200) {
 
   await client.connect();
 
-  // IMPORTANT FIX:
-  //   - First order DESC to get newest rows
-  //   - Then reverse in JS so chart sees chronological data
+  // fetch newest rows, then reverse to oldest→newest for chart
   const res = await client.query(
     `
-    SELECT id, price_usd, created_at
-    FROM nav_history
-    ORDER BY created_at DESC
-    LIMIT $1
+      SELECT id, price_usd, created_at
+      FROM nav_history
+      ORDER BY created_at DESC
+      LIMIT $1
     `,
     [limit]
   );
 
   await client.end();
-
-  // rows are newest → oldest, so flip them
   return res.rows.reverse();
 }
 
@@ -202,6 +191,19 @@ async function saveNavSnapshot() {
   }
 }
 
+// Opportunistic snapshot: run at most every 5 minutes when endpoints are hit
+let lastSnapshotMs = 0;
+const SNAPSHOT_MIN_INTERVAL_MS = 5 * 60 * 1000;
+
+async function maybeSnapshotOnRequest() {
+  const now = Date.now();
+  if (now - lastSnapshotMs < SNAPSHOT_MIN_INTERVAL_MS) return;
+  lastSnapshotMs = now;
+  saveNavSnapshot().catch((e) => {
+    console.error("Background snapshot failed:", e.message);
+  });
+}
+
 // --- EXPRESS API --------------------------------------------------------
 
 const app = express();
@@ -212,9 +214,10 @@ app.get("/", (req, res) => {
   res.json({ ok: true, message: "PINDEX NAV backend" });
 });
 
-// Latest NAV (most recent row)
+// Latest NAV
 app.get("/nav/latest", async (req, res) => {
   try {
+    maybeSnapshotOnRequest(); // fire-and-forget
     const rows = await getLatestNavFromDb(1);
     res.setHeader("Cache-Control", "no-store");
     res.json(rows[0] || null);
@@ -227,8 +230,8 @@ app.get("/nav/latest", async (req, res) => {
 // History for chart
 app.get("/nav/history", async (req, res) => {
   try {
+    maybeSnapshotOnRequest(); // fire-and-forget
     const rows = await getLatestNavFromDb(200);
-    // prevent CDN / browser caching
     res.setHeader("Cache-Control", "no-store");
     res.json(rows);
   } catch (e) {
@@ -237,11 +240,9 @@ app.get("/nav/history", async (req, res) => {
   }
 });
 
-// --- CRON: every 60 seconds ---------------------------------------------
-
-// node-cron format: second minute hour day month dow
-// "*/60 * * * * *" → every 60 seconds (i.e. roughly once per minute)
-cron.schedule("*/60 * * * * *", () => {
+// --- CRON: once per minute ----------------------------------------------
+// seconds minute hour day month dow
+cron.schedule("0 * * * * *", () => {
   saveNavSnapshot().catch(console.error);
 });
 
